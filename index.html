@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Axolotl Dash — Endless Runner</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; background: #0f1c33; }
+  body { display: flex; align-items: center; justify-content: center; font-family: "Trebuchet MS", "Segoe UI", sans-serif; }
+  #wrap { position: relative; }
+  canvas { display: block; border-radius: 14px; box-shadow: 0 18px 60px rgba(0,0,0,.55); touch-action: manipulation; }
+  #hint {
+    position: absolute; inset: auto 0 14px 0; text-align: center;
+    color: #ffffffcc; font-size: 13px; letter-spacing: .06em; pointer-events: none;
+    text-shadow: 0 2px 6px rgba(0,0,0,.5);
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="960" height="540"></canvas>
+  <div id="hint">SPACE / CLICK / TAP — jump &nbsp;·&nbsp; hold for a higher hop &nbsp;·&nbsp; double-jump allowed</div>
+</div>
+<script>
+(() => {
+"use strict";
+
+const cvs = document.getElementById("game");
+const ctx = cvs.getContext("2d");
+const W = cvs.width, H = cvs.height;
+const GROUND = H - 86;
+
+// ---------- state ----------
+const STATE = { READY: 0, PLAY: 1, DEAD: 2 };
+let state = STATE.READY;
+let score = 0;
+let best = Number(localStorage.getItem("axolotl_best") || 0);
+let speed = 5.2;              // world scroll speed (px/frame @60fps-ish)
+let t = 0;                    // global tick
+let shake = 0;                // screen shake timer
+const GRAVITY = 0.62;
+const JUMP_V = -13.2;
+const JUMP2_V = -11.6;
+
+// ---------- axolotl ----------
+const axo = {
+  x: 150, y: GROUND, w: 78, h: 46,
+  vy: 0, onGround: true, jumps: 0,
+  squash: 1,                 // 1 = normal, <1 wider+flatter, >1 stretched
+  blink: 0, blinkTimer: 90 + Math.random() * 120,
+  gillWave: 0,
+};
+
+// ---------- world objects ----------
+let blocks = [];             // obstacles
+let particles = [];
+let clouds = [];
+let bubbles = [];
+let nextSpawn = 60;
+
+function initScenery() {
+  clouds = [];
+  for (let i = 0; i < 6; i++) {
+    clouds.push({ x: Math.random() * W, y: 40 + Math.random() * 160, s: 0.5 + Math.random() * 0.9, v: 0.15 + Math.random() * 0.3 });
+  }
+  bubbles = [];
+  for (let i = 0; i < 14; i++) bubbles.push(spawnBubble(true));
+}
+function spawnBubble(anywhere) {
+  return { x: Math.random() * W, y: anywhere ? Math.random() * H : H + 10, r: 1.5 + Math.random() * 3.5, v: 0.2 + Math.random() * 0.5, sway: Math.random() * Math.PI * 2 };
+}
+
+// colorful block palette
+const PALETTE = ["#ff5d73","#ffb84d","#ffe14d","#5dd97c","#4dc3ff","#b06dff","#ff8ad8"];
+function blockColor() { return PALETTE[(Math.random() * PALETTE.length) | 0]; }
+
+function spawnBlock() {
+  const kind = Math.random();
+  if (kind < 0.62) {
+    // single low block
+    const s = 34 + Math.random() * 22;
+    blocks.push({ x: W + 40, y: GROUND - s, w: s, h: s, c: blockColor(), hit: false, rot: 0 });
+  } else if (kind < 0.85) {
+    // stacked pair — needs a good jump
+    const s = 34;
+    blocks.push({ x: W + 40, y: GROUND - s * 2, w: s, h: s * 2, c: blockColor(), hit: false, rot: 0 });
+  } else {
+    // two spaced singles
+    const s1 = 30 + Math.random() * 20, s2 = 30 + Math.random() * 20;
+    blocks.push({ x: W + 40, y: GROUND - s1, w: s1, h: s1, c: blockColor(), hit: false, rot: 0 });
+    blocks.push({ x: W + 40 + s1 + 90 + Math.random() * 70, y: GROUND - s2, w: s2, h: s2, c: blockColor(), hit: false, rot: 0 });
+  }
+  nextSpawn = (0.75 + Math.random() * 0.9) * (520 / speed) + 34;
+}
+
+function burst(x, y, color, n = 14, power = 5) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const sp = 1 + Math.random() * power;
+    particles.push({ x, y, vx: Math.cos(a) * sp - 1.5, vy: Math.sin(a) * sp - 2, r: 2 + Math.random() * 3.5, c: color, life: 30 + Math.random() * 26 });
+  }
+}
+
+// ---------- input ----------
+function jump() {
+  if (state === STATE.READY) { state = STATE.PLAY; }
+  if (state === STATE.DEAD) { reset(); state = STATE.PLAY; return; }
+  if (axo.onGround) {
+    axo.vy = JUMP_V; axo.onGround = false; axo.jumps = 1; axo.squash = 1.28;
+    burst(axo.x, GROUND, "#9ad7ff", 8, 3);
+  } else if (axo.jumps === 1) {
+    axo.vy = JUMP2_V; axo.jumps = 2; axo.squash = 1.3;
+    burst(axo.x, axo.y + axo.h / 2, "#ffe680", 10, 3.5);
+  }
+}
+window.addEventListener("keydown", e => {
+  if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") { e.preventDefault(); jump(); }
+});
+cvs.addEventListener("mousedown", e => { e.preventDefault(); jump(); });
+cvs.addEventListener("touchstart", e => { e.preventDefault(); jump(); }, { passive: false });
+
+// ---------- reset ----------
+function reset() {
+  blocks = []; particles = [];
+  score = 0; speed = 5.2; nextSpawn = 60;
+  axo.y = GROUND; axo.vy = 0; axo.onGround = true; axo.jumps = 0; axo.squash = 1;
+}
+
+// ---------- update ----------
+function update() {
+  t++;
+  axo.gillWave += 0.15;
+
+  if (state !== STATE.PLAY) {
+    // idle bobbing / death pose still animates a bit
+    if (state === STATE.READY) axo.y = GROUND;
+    updateParticles();
+    return;
+  }
+
+  score += 0.12;
+  speed = Math.min(13, 5.2 + score * 0.012);
+
+  // physics
+  axo.vy += GRAVITY;
+  axo.y += axo.vy;
+  if (axo.y >= GROUND) {
+    if (!axo.onGround) { axo.squash = 0.72; burst(axo.x, GROUND, "#ffffff88", 6, 2.5); }
+    axo.y = GROUND; axo.vy = 0; axo.onGround = true; axo.jumps = 0;
+  }
+  axo.squash += (1 - axo.squash) * 0.18;
+
+  // blinking
+  if (--axo.blinkTimer <= 0) { axo.blink = 8; axo.blinkTimer = 90 + Math.random() * 140; }
+  if (axo.blink > 0) axo.blink--;
+
+  // spawn blocks
+  if (--nextSpawn <= 0) spawnBlock();
+
+  // move blocks
+  for (const b of blocks) {
+    b.x -= speed;
+    b.rot += 0.02;
+    // collision (slightly forgiving hitbox)
+    const pad = 6;
+    if (!b.hit &&
+        axo.x + axo.w * 0.5 - pad > b.x &&
+        axo.x - axo.w * 0.5 + pad < b.x + b.w &&
+        axo.y - pad > b.y - b.h && axo.y - axo.h + pad < b.y) {
+      b.hit = true;
+      die();
+    }
+  }
+  blocks = blocks.filter(b => b.x + b.w > -20);
+
+  // scenery
+  for (const c of clouds) { c.x -= c.v + speed * 0.06 * c.s; if (c.x < -120) { c.x = W + 80; c.y = 40 + Math.random() * 160; } }
+  for (const bu of bubbles) { bu.y -= bu.v; bu.sway += 0.05; if (bu.y < -10) Object.assign(bu, spawnBubble(false)); }
+
+  updateParticles();
+  if (shake > 0) shake--;
+}
+
+function updateParticles() {
+  for (const p of particles) { p.x += p.vx - speed * 0.35; p.y += p.vy; p.vy += 0.18; p.life--; }
+  particles = particles.filter(p => p.life > 0);
+}
+
+function die() {
+  state = STATE.DEAD;
+  shake = 18;
+  burst(axo.x, axo.y - axo.h / 2, "#ffd94d", 26, 7);
+  if (score > best) { best = Math.floor(score); localStorage.setItem("axolotl_best", best); }
+}
+
+// ---------- drawing ----------
+function rr(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawBackground() {
+  // water gradient
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, "#1b3b6f");
+  g.addColorStop(0.55, "#2a6fa8");
+  g.addColorStop(1, "#3fa7c4");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  // light rays
+  ctx.save();
+  ctx.globalAlpha = 0.07;
+  ctx.fillStyle = "#fff";
+  for (let i = 0; i < 4; i++) {
+    const x = ((t * 0.2 + i * 280) % (W + 400)) - 200;
+    ctx.beginPath();
+    ctx.moveTo(x, 0); ctx.lineTo(x + 90, 0); ctx.lineTo(x + 220, GROUND); ctx.lineTo(x + 60, GROUND);
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+
+  // bubbles
+  ctx.strokeStyle = "#ffffff44";
+  ctx.fillStyle = "#ffffff22";
+  for (const b of bubbles) {
+    const bx = b.x + Math.sin(b.sway) * 6;
+    ctx.beginPath(); ctx.arc(bx, b.y, b.r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  }
+
+  // clouds (kelp-ish silhouettes)
+  ctx.fillStyle = "#0e2a4acc";
+  for (const c of clouds) {
+    ctx.beginPath();
+    ctx.ellipse(c.x, c.y, 46 * c.s, 14 * c.s, 0, 0, Math.PI * 2);
+    ctx.ellipse(c.x + 30 * c.s, c.y - 8 * c.s, 30 * c.s, 11 * c.s, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // sandy ground
+  const gg = ctx.createLinearGradient(0, GROUND, 0, H);
+  gg.addColorStop(0, "#e8c98a");
+  gg.addColorStop(1, "#c8a15e");
+  ctx.fillStyle = gg;
+  ctx.fillRect(0, GROUND, W, H - GROUND);
+  ctx.fillStyle = "#00000015";
+  for (let i = 0; i < 26; i++) {
+    const px = ((i * 97 - t * speed) % (W + 40) + W + 40) % (W + 40) - 20;
+    ctx.beginPath(); ctx.ellipse(px, GROUND + 14 + (i % 5) * 12, 9, 3, 0, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.fillStyle = "#8a6c3d";
+  ctx.fillRect(0, GROUND, W, 5);
+}
+
+function drawBlock(b) {
+  ctx.save();
+  ctx.translate(b.x + b.w / 2, b.y - b.h / 2);
+  ctx.fillStyle = "rgba(0,0,0,.2)";
+  rr(-b.w / 2 + 3, -b.h / 2 + 4, b.w, b.h, 8); ctx.fill();
+  ctx.fillStyle = b.c;
+  rr(-b.w / 2, -b.h / 2, b.w, b.h, 8); ctx.fill();
+  // glossy highlight
+  ctx.fillStyle = "rgba(255,255,255,.35)";
+  rr(-b.w / 2 + 4, -b.h / 2 + 4, b.w - 8, b.h * 0.28, 5); ctx.fill();
+  // face on taller stacks
+  if (b.h >= 60) {
+    ctx.fillStyle = "#222";
+    ctx.beginPath(); ctx.arc(-7, 2, 2.6, 0, Math.PI * 2); ctx.arc(7, 2, 2.6, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "#222"; ctx.lineWidth = 2; ctx.lineCap = "round";
+    ctx.beginPath(); ctx.arc(0, 8, 5, 0.15 * Math.PI, 0.85 * Math.PI); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawAxolotl() {
+  const sx = 1 / Math.sqrt(axo.squash);
+  const sy = Math.sqrt(axo.squash);
+  ctx.save();
+  ctx.translate(axo.x, axo.y);
+  ctx.scale(sx, sy);
+
+  // shadow handled separately on ground; draw tail
+  const tailWag = Math.sin(t * 0.25) * 6 + (axo.onGround ? 0 : -4);
+  ctx.fillStyle = "#f7c948";
+  ctx.beginPath();
+  ctx.moveTo(-30, -18);
+  ctx.quadraticCurveTo(-62, -14 + tailWag, -74, -22 + tailWag * 1.4);
+  ctx.quadraticCurveTo(-60, -2 + tailWag, -30, -6);
+  ctx.closePath(); ctx.fill();
+
+  // back leg
+  ctx.fillStyle = "#e6b437";
+  ctx.beginPath(); ctx.ellipse(-18, -5, 9, 5, 0.4, 0, Math.PI * 2); ctx.fill();
+
+  // body
+  const bg = ctx.createLinearGradient(0, -46, 0, 0);
+  bg.addColorStop(0, "#ffe066");
+  bg.addColorStop(1, "#f0b429");
+  ctx.fillStyle = bg;
+  rr(-34, -44, 72, 40, 18); ctx.fill();
+
+  // front leg
+  ctx.fillStyle = "#e6b437";
+  ctx.beginPath(); ctx.ellipse(10, -6, 10, 5, -0.3, 0, Math.PI * 2); ctx.fill();
+  // toes
+  ctx.strokeStyle = "#e6b437"; ctx.lineWidth = 2.4; ctx.lineCap = "round";
+  for (const dx of [4, 10, 16]) { ctx.beginPath(); ctx.moveTo(dx, -3); ctx.lineTo(dx + 3, 1); ctx.stroke(); }
+
+  // head
+  ctx.fillStyle = "#ffd94d";
+  rr(16, -48, 34, 32, 13); ctx.fill();
+
+  // external gills (3 per side) — pink frills
+  const wave = Math.sin(axo.gillWave) * 3;
+  ctx.strokeStyle = "#ff8fb2";
+  ctx.lineWidth = 4;
+  ctx.lineCap = "round";
+  for (const side of [-1, 1]) {
+    for (let i = 0; i < 3; i++) {
+      const bx = 22, by = -42 + i * 9;
+      ctx.beginPath();
+      ctx.moveTo(bx, by);
+      ctx.quadraticCurveTo(bx - 10, by + side * (6 + i * 2) + wave, bx - 18, by + side * (10 + i * 3) + wave * 1.5);
+      ctx.stroke();
+      ctx.fillStyle = "#ff6f9c";
+      ctx.beginPath(); ctx.arc(bx - 18, by + side * (10 + i * 3) + wave * 1.5, 3, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  // eye
+  if (axo.blink > 0) {
+    ctx.strokeStyle = "#5b4300"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(30, -36); ctx.lineTo(38, -36); ctx.stroke();
+  } else {
+    ctx.fillStyle = "#3a2c00";
+    ctx.beginPath(); ctx.arc(34, -36, 3.6, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(35.2, -37.2, 1.3, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // smile
+  ctx.strokeStyle = "#b07d10"; ctx.lineWidth = 2; ctx.lineCap = "round";
+  ctx.beginPath(); ctx.arc(34, -27, 6, 0.1 * Math.PI, 0.8 * Math.PI); ctx.stroke();
+
+  // cheek blush
+  ctx.fillStyle = "rgba(255,120,150,.35)";
+  ctx.beginPath(); ctx.ellipse(24, -29, 4, 2.5, 0, 0, Math.PI * 2); ctx.fill();
+
+  ctx.restore();
+
+  // ground shadow
+  const air = GROUND - axo.y;
+  ctx.fillStyle = `rgba(0,0,0,${Math.max(0.05, 0.25 - air / 500)})`;
+  ctx.beginPath();
+  ctx.ellipse(axo.x, GROUND + 6, Math.max(10, 34 - air * 0.06), 6, 0, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawUI() {
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 30px 'Trebuchet MS', sans-serif";
+  ctx.shadowColor = "rgba(0,0,0,.4)"; ctx.shadowBlur = 6;
+  ctx.fillText(String(Math.floor(score)).padStart(5, "0"), 26, 48);
+  ctx.font = "14px 'Trebuchet MS', sans-serif";
+  ctx.fillStyle = "#ffffffbb";
+  ctx.fillText("BEST " + String(best).padStart(5, "0"), 27, 70);
+  ctx.shadowBlur = 0;
+
+  if (state === STATE.READY) {
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 46px 'Trebuchet MS', sans-serif";
+    ctx.shadowColor = "rgba(0,0,0,.45)"; ctx.shadowBlur = 8;
+    ctx.fillText("AXOLOTL DASH", W / 2, 190);
+    ctx.font = "20px 'Trebuchet MS', sans-serif";
+    ctx.fillText("press SPACE or tap to start", W / 2, 230);
+    ctx.fillText("jump over the blocks!", W / 2, 260);
+    ctx.shadowBlur = 0;
+  }
+  if (state === STATE.DEAD) {
+    ctx.fillStyle = "rgba(10,20,40,.55)";
+    ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 52px 'Trebuchet MS', sans-serif";
+    ctx.fillText("SPLASH!", W / 2, 220);
+    ctx.font = "24px 'Trebuchet MS', sans-serif";
+    ctx.fillText("score " + Math.floor(score) + "  ·  best " + best, W / 2, 262);
+    ctx.font = "18px 'Trebuchet MS', sans-serif";
+    ctx.fillStyle = "#ffe066";
+    ctx.fillText("press SPACE or tap to try again", W / 2, 300);
+  }
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    ctx.globalAlpha = Math.min(1, p.life / 24);
+    ctx.fillStyle = p.c;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ---------- loop ----------
+function frame() {
+  ctx.save();
+  if (shake > 0) ctx.translate((Math.random() - 0.5) * shake, (Math.random() - 0.5) * shake);
+  update();
+  drawBackground();
+  for (const b of blocks) drawBlock(b);
+  drawAxolotl();
+  drawParticles();
+  ctx.restore();
+  drawUI();
+  requestAnimationFrame(frame);
+}
+
+initScenery();
+frame();
+})();
+</script>
+</body>
+</html>
